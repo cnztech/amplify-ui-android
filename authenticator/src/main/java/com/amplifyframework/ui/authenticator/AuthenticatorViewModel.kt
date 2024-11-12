@@ -30,11 +30,13 @@ import com.amplifyframework.auth.cognito.exceptions.service.CodeMismatchExceptio
 import com.amplifyframework.auth.cognito.exceptions.service.CodeValidationException
 import com.amplifyframework.auth.cognito.exceptions.service.InvalidParameterException
 import com.amplifyframework.auth.cognito.exceptions.service.InvalidPasswordException
+import com.amplifyframework.auth.cognito.exceptions.service.LimitExceededException
 import com.amplifyframework.auth.cognito.exceptions.service.PasswordResetRequiredException
 import com.amplifyframework.auth.cognito.exceptions.service.UserNotConfirmedException
 import com.amplifyframework.auth.cognito.exceptions.service.UserNotFoundException
 import com.amplifyframework.auth.cognito.exceptions.service.UsernameExistsException
 import com.amplifyframework.auth.exceptions.NotAuthorizedException
+import com.amplifyframework.auth.exceptions.SessionExpiredException
 import com.amplifyframework.auth.exceptions.UnknownException
 import com.amplifyframework.auth.options.AuthSignUpOptions
 import com.amplifyframework.auth.result.AuthResetPasswordResult
@@ -70,6 +72,7 @@ import com.amplifyframework.ui.authenticator.util.CodeSentMessage
 import com.amplifyframework.ui.authenticator.util.ExpiredCodeMessage
 import com.amplifyframework.ui.authenticator.util.InvalidConfigurationException
 import com.amplifyframework.ui.authenticator.util.InvalidLoginMessage
+import com.amplifyframework.ui.authenticator.util.LimitExceededMessage
 import com.amplifyframework.ui.authenticator.util.MissingConfigurationException
 import com.amplifyframework.ui.authenticator.util.NetworkErrorMessage
 import com.amplifyframework.ui.authenticator.util.PasswordResetMessage
@@ -325,6 +328,35 @@ internal class AuthenticatorViewModel(
         moveTo(newState)
     }
 
+    private suspend fun handleMfaSetupSelectionRequired(
+        username: String,
+        password: String,
+        allowedMfaTypes: Set<MFAType>?
+    ) {
+        if (allowedMfaTypes.isNullOrEmpty()) {
+            handleGeneralFailure(AuthException("Missing allowedMfaTypes", "Please open a bug with Amplify"))
+            return
+        }
+
+        moveTo(
+            stateFactory.newSignInContinueWithMfaSetupSelectionState(
+                allowedMfaTypes = allowedMfaTypes,
+                onSubmit = { mfaType -> confirmSignIn(username, password, mfaType) }
+            )
+        )
+    }
+
+    private suspend fun handleEmailMfaSetupRequired(
+        username: String,
+        password: String
+    ) {
+        moveTo(
+            stateFactory.newSignInContinueWithEmailSetupState(
+                onSubmit = { mfaType -> confirmSignIn(username, password, mfaType) }
+            )
+        )
+    }
+
     private suspend fun handleMfaSelectionRequired(
         username: String,
         password: String,
@@ -346,7 +378,8 @@ internal class AuthenticatorViewModel(
     private suspend fun handleSignInSuccess(username: String, password: String, result: AuthSignInResult) {
         when (val nextStep = result.nextStep.signInStep) {
             AuthSignInStep.DONE -> checkVerificationMechanisms()
-            AuthSignInStep.CONFIRM_SIGN_IN_WITH_SMS_MFA_CODE -> moveTo(
+            AuthSignInStep.CONFIRM_SIGN_IN_WITH_SMS_MFA_CODE,
+            AuthSignInStep.CONFIRM_SIGN_IN_WITH_OTP -> moveTo(
                 stateFactory.newSignInMfaState(
                     result.nextStep.codeDeliveryDetails
                 ) { confirmationCode -> confirmSignIn(username, password, confirmationCode) }
@@ -370,6 +403,10 @@ internal class AuthenticatorViewModel(
             AuthSignInStep.CONFIRM_SIGN_UP -> handleUnconfirmedSignIn(username, password)
             AuthSignInStep.CONTINUE_SIGN_IN_WITH_MFA_SELECTION ->
                 handleMfaSelectionRequired(username, password, result.nextStep.allowedMFATypes)
+            AuthSignInStep.CONTINUE_SIGN_IN_WITH_MFA_SETUP_SELECTION ->
+                handleMfaSetupSelectionRequired(username, password, result.nextStep.allowedMFATypes)
+            AuthSignInStep.CONTINUE_SIGN_IN_WITH_EMAIL_MFA_SETUP ->
+                handleEmailMfaSetupRequired(username, password)
             AuthSignInStep.CONTINUE_SIGN_IN_WITH_TOTP_SETUP ->
                 handleTotpSetupRequired(username, password, result.nextStep.totpSetupDetails)
             AuthSignInStep.CONFIRM_SIGN_IN_WITH_TOTP_CODE -> moveTo(
@@ -424,8 +461,8 @@ internal class AuthenticatorViewModel(
 
     //endregion
     //region Password Reset
-
-    private suspend fun resetPassword(username: String) {
+    @VisibleForTesting
+    suspend fun resetPassword(username: String) {
         viewModelScope.launch {
             logger.debug("Initiating reset password")
             when (val result = authProvider.resetPassword(username)) {
@@ -435,12 +472,13 @@ internal class AuthenticatorViewModel(
         }.join()
     }
 
-    private suspend fun confirmResetPassword(username: String, password: String, code: String) {
+    @VisibleForTesting
+    suspend fun confirmResetPassword(username: String, password: String, code: String) {
         viewModelScope.launch {
             logger.debug("Confirming password reset")
             when (val result = authProvider.confirmResetPassword(username, password, code)) {
                 is AmplifyResult.Error -> handleResetPasswordError(result.error)
-                is AmplifyResult.Success -> handlePasswordResetComplete()
+                is AmplifyResult.Success -> handlePasswordResetComplete(username, password)
             }
         }.join()
     }
@@ -467,12 +505,17 @@ internal class AuthenticatorViewModel(
         }
     }
 
-    private suspend fun handlePasswordResetComplete() {
+    private suspend fun handlePasswordResetComplete(username: String? = null, password: String? = null) {
         logger.debug("Password reset complete")
         sendMessage(PasswordResetMessage)
-        moveTo(
-            stateFactory.newSignInState(this::signIn)
-        )
+        if (username != null && password != null) {
+            when (val result = authProvider.signIn(username, password)) {
+                is AmplifyResult.Error -> moveTo(stateFactory.newSignInState(this::signIn))
+                is AmplifyResult.Success -> handleSignInSuccess(username, password, result.data)
+            }
+        } else {
+            moveTo(stateFactory.newSignInState(this::signIn))
+        }
     }
 
     private suspend fun handleResetPasswordError(error: AuthException) = handleAuthException(error)
@@ -553,6 +596,7 @@ internal class AuthenticatorViewModel(
             is CodeDeliveryFailureException -> sendMessage(CannotSendCodeMessage(error))
             is CodeExpiredException -> sendMessage(ExpiredCodeMessage(error))
             is CodeValidationException -> sendMessage(UnknownErrorMessage(error))
+            is LimitExceededException -> sendMessage(LimitExceededMessage(error))
             is UnknownException -> {
                 if (error.isConnectivityIssue()) {
                     sendMessage(NetworkErrorMessage(error))
@@ -567,7 +611,16 @@ internal class AuthenticatorViewModel(
     private suspend fun handleSignedIn() {
         logger.debug("Log in successful, getting current user")
         when (val result = authProvider.getCurrentUser()) {
-            is AmplifyResult.Error -> handleGeneralFailure(result.error)
+            is AmplifyResult.Error -> {
+                if (result.error is SessionExpiredException) {
+                    logger.error(result.error.toString())
+                    logger.error("Current signed in user session has expired, signing out.")
+                    signOut()
+                } else {
+                    handleGeneralFailure(result.error)
+                }
+            }
+
             is AmplifyResult.Success -> moveTo(stateFactory.newSignedInState(result.data, this::signOut))
         }
     }
