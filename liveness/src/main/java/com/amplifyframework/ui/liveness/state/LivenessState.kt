@@ -69,7 +69,7 @@ internal data class LivenessState(
     var faceMatchOvalEnd: Long? = null
     private var initialFaceOvalIou = -1f
     private var faceOvalMatchTimer: TimerTask? = null
-    private var detectedFaceMatchedOval = false
+    var detectedFaceMatchedOval = false; private set
 
     @VisibleForTesting
     var readyForOval = false

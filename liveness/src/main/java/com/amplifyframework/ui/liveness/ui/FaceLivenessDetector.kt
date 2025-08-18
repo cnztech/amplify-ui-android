@@ -61,6 +61,7 @@ import com.amplifyframework.predictions.models.FaceLivenessSession
 import com.amplifyframework.ui.liveness.R
 import com.amplifyframework.ui.liveness.camera.LivenessCoordinator
 import com.amplifyframework.ui.liveness.camera.OnChallengeComplete
+import com.amplifyframework.ui.liveness.camera.OnChallengeProgressUpdated
 import com.amplifyframework.ui.liveness.ml.FaceDetector
 import com.amplifyframework.ui.liveness.model.FaceLivenessDetectionException
 import com.amplifyframework.ui.liveness.model.LivenessCheckState
@@ -83,6 +84,7 @@ fun FaceLivenessDetector(
     credentialsProvider: AWSCredentialsProvider<AWSCredentials>? = null,
     disableStartView: Boolean = false,
     onComplete: Action,
+    onChallengeProgressUpdated: OnChallengeProgressUpdated? = null,
     onError: Consumer<FaceLivenessDetectionException>
 ) = FaceLivenessDetector(
     sessionId,
@@ -90,6 +92,7 @@ fun FaceLivenessDetector(
     credentialsProvider,
     disableStartView,
     onComplete,
+    onChallengeProgressUpdated,
     onError,
     ChallengeOptions()
 )
@@ -110,6 +113,7 @@ fun FaceLivenessDetector(
     credentialsProvider: AWSCredentialsProvider<AWSCredentials>? = null,
     disableStartView: Boolean = false,
     onComplete: Action,
+    onChallengeProgressUpdated: OnChallengeProgressUpdated? = null,
     onError: Consumer<FaceLivenessDetectionException>,
     challengeOptions: ChallengeOptions = ChallengeOptions(),
 ) {
@@ -164,6 +168,9 @@ fun FaceLivenessDetector(
                         }
                     }
                 },
+                onChallengeProgressUpdated = { progress ->
+                    scope.launch { onChallengeProgressUpdated?.invoke(progress) }
+                },
                 onChallengeFailed = {
                     scope.launch {
                         // if we are already finished, we already provided a result in complete or failed
@@ -188,6 +195,7 @@ internal fun ChallengeView(
     disableStartView: Boolean,
     challengeOptions: ChallengeOptions,
     onChallengeComplete: OnChallengeComplete,
+    onChallengeProgressUpdated: OnChallengeProgressUpdated,
     onChallengeFailed: Consumer<FaceLivenessDetectionException>
 ) {
     val context = LocalContext.current
@@ -211,6 +219,7 @@ internal fun ChallengeView(
                 onChallengeComplete = { currentOnChallengeComplete() },
                 onChallengeFailed = { currentOnChallengeFailed.accept(it) }
             )
+            onChallengeProgressUpdated.invoke(0f)
         } catch (e: Exception) {
             currentOnChallengeFailed.accept(
                 FaceLivenessDetectionException(
@@ -227,6 +236,15 @@ internal fun ChallengeView(
 
     val livenessCoordinator = coordinator ?: return
     val livenessState = livenessCoordinator.livenessState
+
+    LaunchedEffect(livenessCoordinator.livenessState.faceMatchPercentage, livenessCoordinator.livenessState.detectedFaceMatchedOval) {
+        val percentage = if (livenessCoordinator.livenessState.detectedFaceMatchedOval) {
+            1f
+        } else {
+            livenessCoordinator.livenessState.faceMatchPercentage
+        }
+        onChallengeProgressUpdated.invoke(percentage)
+    }
 
     val localDensity = LocalDensity.current
     val backgroundColor = if (livenessState.showingStartView) {

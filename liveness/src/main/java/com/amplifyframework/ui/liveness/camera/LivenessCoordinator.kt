@@ -60,6 +60,8 @@ import kotlinx.coroutines.launch
 
 internal typealias OnMuxedSegment = (bytes: ByteArray, timestamp: Long) -> Unit
 internal typealias OnChallengeComplete = () -> Unit
+typealias OnChallengeProgressUpdated = (progress: Float) -> Unit
+
 internal typealias OnFreshnessColorDisplayed = (
     currentColor: RgbColor,
     previousColor: RgbColor,
